@@ -3,9 +3,8 @@ project(chat_app_server C)
 
 set(CMAKE_C_STANDARD 99)
 
-find_package(OpenSSL REQUIRED)
 include_directories(${OPENSSL_INCLUDE_DIR})
 
-add_executable(chat_app_server hashmap.c main.c)
+add_executable(chat_app_server hashmap.c base64.c sha1.c main.c)
 
 target_link_libraries(chat_app_server  ${OPENSSL_CRYPTO_LIBRARY} )

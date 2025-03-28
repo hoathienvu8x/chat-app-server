@@ -11,13 +11,12 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <errno.h>
-#include <openssl/sha.h>
-#include <openssl/bio.h>
-#include <openssl/evp.h>
 #include <inttypes.h>
 #include <math.h>
 
 #include "hashmap.h"
+#include "base64.h"
+#include "sha1.h"
 
 #ifndef BUFFER_SIZE
   #define BUFFER_SIZE 1024
@@ -273,12 +272,12 @@ void accept_protocol_upgrade(int clientfd, struct conn_state_t *conn, char *key,
   unsigned char *buf = malloc((strlen(magic_string) + strlen(key)) * sizeof(char));
   memcpy(buf, key, strlen(key));
   memcpy(buf + strlen(key), magic_string, strlen(magic_string));
-  unsigned char sha1_result[20];
+  unsigned char sha1_result[SHA1_BLOCK_SIZE];
   memset(sha1_result, 0, sizeof(sha1_result));
   SHA1(buf, strlen(buf), sha1_result);
   char encodedData[120];
   memset(encodedData, 0, sizeof(encodedData));
-  EVP_EncodeBlock((unsigned char *) encodedData, sha1_result, sizeof(sha1_result));
+  base64_encode((const unsigned char *)sha1_result, SHA1_BLOCK_SIZE, encodedData);
   const char *response_template =
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection:"
     " Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n";
