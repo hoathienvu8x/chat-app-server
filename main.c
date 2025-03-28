@@ -579,8 +579,52 @@ void read_ws_message(int clientfd, struct conn_state_t *conn, int efd) {
     }
   }
 }
+static int create_socket(const char *bind_addr, uint16_t bind_port) {
+  int ret, on = 1;
+  int tcp_fd = -1;
+  struct addrinfo hints, *result, *rp;
+  char port[20] = {0};
 
+  if (sprintf(port, "%d", bind_port) <= 0)
+  {
+    perror("sprintf(): ");
+    return -1;
+  }
 
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_flags = AI_PASSIVE;
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+
+  if (getaddrinfo(bind_addr, port, &hints, &result) != 0) {
+    perror("getaddrinfo(): ");
+    return -1;
+  }
+
+  for (rp = result; rp != NULL; rp = rp->ai_next) {
+    tcp_fd = socket(
+      rp->ai_family, rp->ai_socktype, rp->ai_protocol
+    );
+    if (tcp_fd < 0) continue;
+
+    ret = setsockopt(
+      tcp_fd, SOL_SOCKET, SO_REUSEADDR, (const char *)&on, sizeof(on)
+    );
+
+    if (ret == 0 && bind(tcp_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
+      break;
+    }
+    close(tcp_fd);
+    tcp_fd = -1;
+  }
+
+  freeaddrinfo(result);
+
+  if (rp == NULL || tcp_fd < 0) {
+    return -1;
+  }
+  return tcp_fd;
+}
 int main(int argc, char const *argv[]) {
 
   if (argc != 3) {
@@ -593,7 +637,8 @@ int main(int argc, char const *argv[]) {
 
   connections = hashmap_new();
 
-  int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  u_int16_t PORT = (u_int16_t) strtol(argv[2], (char **)NULL, 10);
+  int sockfd = create_socket(argv[1], PORT);
 
   if (sockfd < 0) {
     perror("socket failed");
@@ -605,30 +650,7 @@ int main(int argc, char const *argv[]) {
     exit(0);
   }
 
-  int reuse = 1;
-  int res = setsockopt(
-    sockfd, SOL_SOCKET, SO_REUSEADDR, (const char *) &reuse, sizeof(reuse)
-  );
-  if (res == -1) {
-    perror("setsockopt reuseaddr error");
-  }
-
-  u_int16_t PORT = (u_int16_t) strtol(argv[2], (char **)NULL, 10);
-  struct sockaddr_in sa;
-  memset(&sa, 0, sizeof(struct sockaddr_in));
-  sa.sin_family = AF_INET;
-  sa.sin_addr.s_addr = inet_addr(argv[1]);
-  sa.sin_port = htons(PORT);
-
-  res = bind(
-    sockfd, (const struct sockaddr *) &sa, sizeof(struct sockaddr_in)
-  );
-  if (res == -1) {
-    perror("bind error");
-    exit(1);
-  }
-
-  res = set_nonblocking(sockfd);
+  int res = set_nonblocking(sockfd);
   if (res == -1) {
     perror("error on setting socket as non-blocking");
     exit(1);
