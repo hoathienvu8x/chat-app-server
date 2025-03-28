@@ -31,22 +31,20 @@ char *method_not_supported = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
 char *bad_request = "HTTP/1.1 400 Bad Request\r\n\r\n";
 
 
-struct write_state {
-  struct write_state *next;
+struct write_state_t {
+  struct write_state_t *next;
   char *buf;
   size_t msg_len;
   size_t bytes_wrote;
 };
 
-
-struct write_queue {
-  struct write_state *head;
-  struct write_state *tail;
+struct write_queue_t {
+  struct write_state_t *head;
+  struct write_state_t *tail;
   size_t size;
 };
 
-
-struct conn_state {         //used to store state of connection if we got partial read or write
+struct conn_state_t {         //used to store state of connection if we got partial read or write
   char protocol;          //0 - HTTP, 1 - WebSocket
   int fd;
   char ip[36];
@@ -60,84 +58,84 @@ struct conn_state {         //used to store state of connection if we got partia
   char fin;
   char skip;
   char mask[4];
-  struct write_queue write_queue;    //write needs a queue in case we had partial write and then read which started another write
+  struct write_queue_t queue;    //write needs a queue in case we had partial write and then read which started another write
 };
 
-
-void append(struct write_queue *write_queue, struct write_state *write_state) {
-  if (write_queue->size == 0) {
-    write_queue->head = write_state;
-    write_queue->tail = write_state;
+void queue_append(struct write_queue_t *queue, struct write_state_t *state) {
+  if (queue->size == 0) {
+    queue->head = state;
+    queue->tail = state;
   } else {
-    write_queue->tail->next = write_state;
-    write_queue->tail = write_state;
+    queue->tail->next = state;
+    queue->tail = state;
   }
-  write_queue->size++;
+  queue->size++;
 }
 
-void remove_front(struct write_queue *write_queue) {
-  if (write_queue->size == 0)
+void queue_remove_front(struct write_queue_t *queue) {
+  if (queue->size == 0)
     return;
-  if (write_queue->size == 1) {
-    free(write_queue->head);
-    memset(write_queue, 0, sizeof(struct write_queue));
+  if (queue->size == 1) {
+    free(queue->head);
+    memset(queue, 0, sizeof(struct write_queue_t));
     return;
   } else {
-    struct write_state *temp = write_queue->head->next;
-    free(write_queue->head);
-    write_queue->head = temp;
-    write_queue->size--;
+    struct write_state_t *temp = queue->head->next;
+    free(queue->head);
+    queue->head = temp;
+    queue->size--;
   }
 }
 
-void release_and_reset(struct conn_state *conn_state) {
+void release_and_reset(struct conn_state_t *conn) {
   puts("Clearing");
-  struct write_state *write_state = conn_state->write_queue.head;
-  while (write_state != NULL) {
-    free(write_state->buf);
-    write_state = write_state->next;
+  struct write_state_t *state = conn->queue.head;
+  while (state != NULL) {
+    free(state->buf);
+    state = state->next;
   }
-  hashmap_remove(connections, conn_state->ip);
-  close(conn_state->fd);
-  memset(conn_state, 0, sizeof(struct conn_state));
+  hashmap_remove(connections, conn->ip);
+  close(conn->fd);
+  memset(conn, 0, sizeof(struct conn_state_t));
 }
 
 
-void parse_data_frame(struct conn_state *conn_state) {
-  if (conn_state->bytes_read < 6)
+void parse_data_frame(struct conn_state_t *conn) {
+  if (conn->bytes_read < 6)
     return;
-  char *buf = conn_state->buf;
+
+  char *buf = conn->buf;
   size_t msg_len = (unsigned int) (*(buf + 1) & 127);
-  conn_state->fin = (buf[0] & 128) ? (char) 1 : (char) 0;
-  conn_state->opcode = buf[0] & 0b00001111;
+  conn->fin = (buf[0] & 128) ? (char) 1 : (char) 0;
+  conn->opcode = buf[0] & 0b00001111;
   if (msg_len <= 125) {
-    conn_state->skip = 6;
-    conn_state->buf_len = msg_len + conn_state->skip;
-    memcpy(conn_state->mask, buf + 2, sizeof(conn_state->mask));
-    conn_state->data_frame_received = 1;
-  } else if (msg_len == 126 && conn_state->bytes_read >= 8) {
+    conn->skip = 6;
+    conn->buf_len = msg_len + conn->skip;
+    memcpy(conn->mask, buf + 2, sizeof(conn->mask));
+    conn->data_frame_received = 1;
+  } else if (msg_len == 126 && conn->bytes_read >= 8) {
     uint16_t u16;
     memcpy(&u16, buf + 2, sizeof(uint16_t));
-    conn_state->skip = 8;
-    conn_state->buf_len = ntohs(u16) + conn_state->skip;
-    memcpy(conn_state->mask, buf + 4, sizeof(conn_state->mask));
-    conn_state->data_frame_received = 1;
-  } else if (msg_len == 127 && conn_state->bytes_read >= 14) {
+    conn->skip = 8;
+    conn->buf_len = ntohs(u16) + conn->skip;
+    memcpy(conn->mask, buf + 4, sizeof(conn->mask));
+    conn->data_frame_received = 1;
+  } else if (msg_len == 127 && conn->bytes_read >= 14) {
     uint64_t u64;
     memcpy(&u64, buf + 2, sizeof(uint64_t));
-    conn_state->skip = 14;
-    conn_state->buf_len = (size_t) be64toh(u64) + conn_state->skip;
-    memcpy(conn_state->mask, buf + 10, sizeof(conn_state->mask));
-    conn_state->data_frame_received = 1;
+    conn->skip = 14;
+    conn->buf_len = (size_t) be64toh(u64) + conn->skip;
+    memcpy(conn->mask, buf + 10, sizeof(conn->mask));
+    conn->data_frame_received = 1;
   }
 }
 
-void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
+void resume_write(int clientfd, struct conn_state_t* conn, int efd) {
   //data is already packed into frames if we were writing to websocket
-  char *msg = conn_state->write_queue.head->buf;
-  size_t remaining_bytes = conn_state->write_queue.head->msg_len - conn_state->write_queue.head->bytes_wrote;
+  char *msg = conn->queue.head->buf;
+  size_t remaining_bytes = conn->queue.head->msg_len - conn->queue.head->bytes_wrote;
   while (1) {
-    size_t offset = conn_state->write_queue.head->bytes_wrote;
+    size_t offset = conn->queue.head->bytes_wrote;
     size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
     ssize_t bytes_wrote = write(clientfd, msg + offset, to_write);
     if (bytes_wrote == -1) {
@@ -147,16 +145,16 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
         break;
       } else if (errno == EPIPE) {
         printf("Client %d has terminated connection\n", clientfd);
-        release_and_reset(conn_state);
+        release_and_reset(conn);
         break;
       } else {
         remaining_bytes -= bytes_wrote;
-        conn_state->write_queue.head->bytes_wrote += bytes_wrote;
+        conn->queue.head->bytes_wrote += bytes_wrote;
         if (remaining_bytes == 0) {
           //were done -> remove head from queue and start writing next message. Stop polling for write event
-          remove_front(
-                &conn_state->write_queue);                            //and return if there are no enqueued operations
-          if (conn_state->write_queue.size == 0) {
+          queue_remove_front(
+                &conn->queue);                            //and return if there are no enqueued operations
+          if (conn->queue.size == 0) {
             struct epoll_event event;
             memset(&event, 0, sizeof(event));
             event.data.fd = clientfd;
@@ -165,9 +163,9 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
             break;
           } else {
             //update variables so that next write starts to write next message
-            msg = conn_state->write_queue.head->buf;
+            msg = conn->queue.head->buf;
             remaining_bytes =
-                    conn_state->write_queue.head->msg_len - conn_state->write_queue.head->bytes_wrote;
+                    conn->queue.head->msg_len - conn->queue.head->bytes_wrote;
           }
         }
         //otherwise continue writing until we get EAGAIN or finish the write
@@ -176,7 +174,7 @@ void resume_write(int clientfd, struct conn_state* conn_state, int efd) {
   }
 }
 
-void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state* conn_state, int efd) {
+void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state_t* conn, int efd) {
   size_t remaining_bytes = msg_len;
   size_t bytes_sent = 0;
   while (1) {
@@ -191,15 +189,15 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
         event.data.fd = clientfd;
         epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
         //also save the state
-        struct write_state* write_state = calloc(1, sizeof(struct write_state));
-        write_state->buf = malloc(remaining_bytes * sizeof(char));
-        memcpy(write_state->buf, msg + bytes_sent, remaining_bytes);
-        write_state->msg_len = remaining_bytes;
-        write_state->bytes_wrote = 0;
-        append(&conn_state->write_queue, write_state);
+        struct write_state_t* state = calloc(1, sizeof(struct write_state_t));
+        state->buf = malloc(remaining_bytes * sizeof(char));
+        memcpy(state->buf, msg + bytes_sent, remaining_bytes);
+        state->msg_len = remaining_bytes;
+        state->bytes_wrote = 0;
+        queue_append(&conn->queue, state);
       } else if (errno == EPIPE) {
         printf("Client %d has terminated connection\n", clientfd);
-        release_and_reset(conn_state);
+        release_and_reset(conn);
         break;
       } else {
         perror("Error on writing to client");
@@ -217,7 +215,7 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state*
   }
 }
 
-void accept_protocol_upgrade(int clientfd, struct conn_state *conn_state, char *key, int efd) {
+void accept_protocol_upgrade(int clientfd, struct conn_state_t *conn, char *key, int efd) {
   printf("Upgrading protocol for client %d\n", clientfd);
   const char *magic_string = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
   unsigned char *buf = malloc((strlen(magic_string) + strlen(key)) * sizeof(char));
@@ -232,12 +230,12 @@ void accept_protocol_upgrade(int clientfd, struct conn_state *conn_state, char *
   const char *response_template = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n";
   char response[256];
   sprintf(response, response_template, encodedData);
-  write_to_socket(clientfd, response, strlen(response), conn_state, efd);
-  conn_state->protocol = WEBSOCKET_PROTOCOL;
+  write_to_socket(clientfd, response, strlen(response), conn, efd);
+  conn->protocol = WEBSOCKET_PROTOCOL;
   free(buf);
 }
 
-void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int efd) {
+void parse_header(int clientfd, char *msg, struct conn_state_t *conn, int efd) {
   char *first_line = strtok(msg, "\r\n");
   char *rest = msg + strlen(first_line) + 2;
   char *method = strtok(first_line, " ");
@@ -259,38 +257,38 @@ void parse_header(int clientfd, char *msg, struct conn_state *conn_state, int ef
       }
       if (line == NULL) {
         puts("Bad request");
-        write_to_socket(clientfd, bad_request, strlen(bad_request), conn_state, efd);
+        write_to_socket(clientfd, bad_request, strlen(bad_request), conn, efd);
         return;
       }
       line[strlen(line)] = ':';
       char *key = strtok(line, ": ") + strlen(line) + 2;
-      accept_protocol_upgrade(clientfd, conn_state, key, efd);
+      accept_protocol_upgrade(clientfd, conn, key, efd);
     } else {
       puts("Not found");
-      write_to_socket(clientfd, content_not_found, strlen(content_not_found), conn_state, efd);
+      write_to_socket(clientfd, content_not_found, strlen(content_not_found), conn, efd);
     }
   } else {
     puts("Method not supported");
-    write_to_socket(clientfd, method_not_supported, strlen(method_not_supported), conn_state, efd);
+    write_to_socket(clientfd, method_not_supported, strlen(method_not_supported), conn, efd);
   }
 }
 
 
-void read_http_request(int clientfd, struct conn_state *conn_state, int efd) {
+void read_http_request(int clientfd, struct conn_state_t *conn, int efd) {
   char finished = 0;
-  if (conn_state->bytes_read == 0) {                          //if read is not resumed allocate some space
-    conn_state->buf = calloc(1024, sizeof(char));
-    conn_state->buf_len = 1024;
+  if (conn->bytes_read == 0) {                          //if read is not resumed allocate some space
+    conn->buf = calloc(1024, sizeof(char));
+    conn->buf_len = 1024;
   }
   while (1) {
-    ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read,
-                      conn_state->buf_len - conn_state->bytes_read);
+    ssize_t bytes_read = read(clientfd, conn->buf + conn->bytes_read,
+                      conn->buf_len - conn->bytes_read);
     if (bytes_read == -1) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
         if (finished) {
-          free(conn_state->buf);
-          conn_state->bytes_read = 0;
-          conn_state->buf_len = 0;
+          free(conn->buf);
+          conn->bytes_read = 0;
+          conn->buf_len = 0;
         }
         break;
       } else {
@@ -299,33 +297,33 @@ void read_http_request(int clientfd, struct conn_state *conn_state, int efd) {
       }
     } else if (bytes_read == 0) {
       printf("Client %d has disconnected\n", clientfd);
-      release_and_reset(conn_state);
+      release_and_reset(conn);
       break;
     } else {
       finished = 0;       //we expected EAGAIN but new data arrived
-      conn_state->bytes_read += bytes_read;
-      if (conn_state->bytes_read > conn_state->buf_len) {
+      conn->bytes_read += bytes_read;
+      if (conn->bytes_read > conn->buf_len) {
         //header too big
-        write_to_socket(clientfd, header_too_big, strlen(header_too_big), conn_state, efd);
+        write_to_socket(clientfd, header_too_big, strlen(header_too_big), conn, efd);
         finished = 1;
       }
       char *delim = "\r\n\r\n";
-      char *p = strstr(conn_state->buf + conn_state->bytes_read - bytes_read, delim);
+      char *p = strstr(conn->buf + conn->bytes_read - bytes_read, delim);
       size_t bytes_after_header = 0;
       while (p != NULL) {
         //found header
         //since we don't expect anything in a request body, any data after header is part of (or a whole) new header
         p = p + strlen(delim);
-        size_t header_len = p - conn_state->buf;
-        bytes_after_header = conn_state->bytes_read - header_len;
+        size_t header_len = p - conn->buf;
+        bytes_after_header = conn->bytes_read - header_len;
         char *buf = malloc(header_len * sizeof(char));
-        memcpy(buf, conn_state->buf, header_len);
-        parse_header(clientfd, buf, conn_state, efd);
+        memcpy(buf, conn->buf, header_len);
+        parse_header(clientfd, buf, conn, efd);
         free(buf);
-        memcpy(conn_state->buf, conn_state->buf + header_len, bytes_after_header);
-        memset(conn_state->buf + bytes_after_header, 0, conn_state->buf_len - bytes_after_header);
-        conn_state->bytes_read = bytes_after_header;
-        p = strstr(conn_state->buf, delim);
+        memcpy(conn->buf, conn->buf + header_len, bytes_after_header);
+        memset(conn->buf + bytes_after_header, 0, conn->buf_len - bytes_after_header);
+        conn->bytes_read = bytes_after_header;
+        p = strstr(conn->buf, delim);
       }
       if (bytes_after_header == 0)
         finished = 1;
@@ -335,12 +333,12 @@ void read_http_request(int clientfd, struct conn_state *conn_state, int efd) {
 }
 
 
-char *decode_ws_message(struct conn_state *conn_state, size_t *decoded_msg_len) {
-  char *payload = conn_state->buf + conn_state->skip;
-  *decoded_msg_len = conn_state->buf_len - conn_state->skip;
+char *decode_ws_message(struct conn_state_t *conn, size_t *decoded_msg_len) {
+  char *payload = conn->buf + conn->skip;
+  *decoded_msg_len = conn->buf_len - conn->skip;
   char *msg = calloc(*decoded_msg_len, sizeof(char));
   for (int i = 0; i < *decoded_msg_len; ++i)
-    msg[i] = payload[i] ^ conn_state->mask[i % 4];
+    msg[i] = payload[i] ^ conn->mask[i % 4];
   return msg;
 }
 
@@ -362,7 +360,7 @@ void enframe(size_t msg_len, char *frame, size_t *frame_len) {
 }
 
 
-void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd) {
+void dispatch_clients_request(char *msg, struct conn_state_t *conn, int efd) {
   size_t frame_len;
   char frame[10];
   char *first_line = strtok(msg, "\n");
@@ -370,7 +368,7 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
   char *action = strtok(first_line, " ");
   char *target = msg + strlen(action) + 1;
   int clientfd;
-  int len = conn_state->buf_len - conn_state->skip - 2 - strlen(action) - strlen(target);
+  int len = conn->buf_len - conn->skip - 2 - strlen(action) - strlen(target);
   char* extracted_payload = calloc(len, sizeof(char));
   memcpy(extracted_payload, payload, len);
   printf("%s\n", extracted_payload);
@@ -380,36 +378,36 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
     char *buf = calloc(128, sizeof(char));
     snprintf(buf, 128 + strlen(payload), "NOT_CONNECTED %s\n", target);
     enframe(strlen(buf), frame, &frame_len);
-    write_to_socket(conn_state->fd, frame, frame_len, conn_state, efd);
-    write_to_socket(conn_state->fd, buf, strlen(buf), conn_state, efd);
+    write_to_socket(conn->fd, frame, frame_len, conn, efd);
+    write_to_socket(conn->fd, buf, strlen(buf), conn, efd);
     free(buf);
   } else {
-    printf("Message from %s to %s, socket %d\n", conn_state->ip, target, clientfd);
+    printf("Message from %s to %s, socket %d\n", conn->ip, target, clientfd);
     printf("Payload: %s\n", extracted_payload);
     char *buf = calloc(128 + strlen(payload), sizeof(char));
-    snprintf(buf, 128 + strlen(extracted_payload), "MESSAGE_TO %s\n%s", conn_state->ip, extracted_payload);
+    snprintf(buf, 128 + strlen(extracted_payload), "MESSAGE_TO %s\n%s", conn->ip, extracted_payload);
     enframe(strlen(buf), frame, &frame_len);
-    write_to_socket(clientfd, frame, frame_len, conn_state, efd);
-    write_to_socket(clientfd, buf, strlen(buf), conn_state, efd);
+    write_to_socket(clientfd, frame, frame_len, conn, efd);
+    write_to_socket(clientfd, buf, strlen(buf), conn, efd);
     free(buf);
     free(extracted_payload);
   }
 }
 
 
-void read_ws_message(int clientfd, struct conn_state *conn_state, int efd) {
+void read_ws_message(int clientfd, struct conn_state_t *conn, int efd) {
   char finished = 0;
-  if (conn_state->bytes_read == 0) {              //if read is not resumed allocate some space
-    conn_state->buf = calloc(1024, sizeof(char));
-    conn_state->buf_len = 1024;
+  if (conn->bytes_read == 0) {              //if read is not resumed allocate some space
+    conn->buf = calloc(1024, sizeof(char));
+    conn->buf_len = 1024;
   }
   while (1) {
-    ssize_t bytes_read = read(clientfd, conn_state->buf + conn_state->bytes_read,
-                      conn_state->buf_len - conn_state->bytes_read);
+    ssize_t bytes_read = read(clientfd, conn->buf + conn->bytes_read,
+                      conn->buf_len - conn->bytes_read);
     if (bytes_read == -1) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
         if (finished) {
-          free(conn_state->buf);
+          free(conn->buf);
         }
         break;
       } else {
@@ -418,66 +416,66 @@ void read_ws_message(int clientfd, struct conn_state *conn_state, int efd) {
       }
     } else if (bytes_read == 0) {
       printf("Client %d has disconnected", clientfd);
-      release_and_reset(conn_state);
+      release_and_reset(conn);
       break;
     } else {
       finished = 0;                                   //we expected EAGAIN but new data arrived
-      conn_state->bytes_read += bytes_read;
-      if (!conn_state->data_frame_received) {        //that needs to be done only once
-        size_t old_buf_len = conn_state->buf_len;
-        parse_data_frame(conn_state);
-        if (conn_state->buf_len > old_buf_len) {
+      conn->bytes_read += bytes_read;
+      if (!conn->data_frame_received) {        //that needs to be done only once
+        size_t old_buf_len = conn->buf_len;
+        parse_data_frame(conn);
+        if (conn->buf_len > old_buf_len) {
           //allocate more space
-          char *new_buffer = calloc(conn_state->buf_len, sizeof(char));
-          memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
-          free(conn_state->buf);
-          conn_state->buf = new_buffer;
+          char *new_buffer = calloc(conn->buf_len, sizeof(char));
+          memcpy(new_buffer, conn->buf, conn->bytes_read);
+          free(conn->buf);
+          conn->buf = new_buffer;
         }
       }
-      while (conn_state->bytes_read >= conn_state->buf_len) {
+      while (conn->bytes_read >= conn->buf_len) {
         //we had more than one message or more in the buffer
         size_t decoded_msg_len;
-        char *decoded_msg = decode_ws_message(conn_state, &decoded_msg_len);
+        char *decoded_msg = decode_ws_message(conn, &decoded_msg_len);
         if (decoded_msg_len == 2) {
           puts("Closing handshake");
-          release_and_reset(conn_state);
+          release_and_reset(conn);
           return;
         }
-        if (conn_state->fin) {
-          if (conn_state->opcode == 0x9) {
+        if (conn->fin) {
+          if (conn->opcode == 0x9) {
             //it's a ping
             ;
           } else {
             //process message
-            dispatch_clients_request(decoded_msg, conn_state, efd);
+            dispatch_clients_request(decoded_msg, conn, efd);
           }
           free(decoded_msg);
-        } else if (conn_state->opcode == 0x1 ||
-               conn_state->opcode == 0x2) {        //new message that will be continued, were saving it
-          conn_state->msg = decoded_msg;
-          conn_state->msg_len = decoded_msg_len;
-        } else if (conn_state->opcode == 0x0) {                                     //continuation of a message
-          char *new_buffer = calloc(decoded_msg_len + conn_state->msg_len, sizeof(char));
-          memcpy(new_buffer, conn_state->msg, conn_state->msg_len);
-          memcpy(new_buffer + conn_state->msg_len, decoded_msg, decoded_msg_len);
-          conn_state->msg_len += decoded_msg_len;
+        } else if (conn->opcode == 0x1 ||
+               conn->opcode == 0x2) {        //new message that will be continued, were saving it
+          conn->msg = decoded_msg;
+          conn->msg_len = decoded_msg_len;
+        } else if (conn->opcode == 0x0) {                                     //continuation of a message
+          char *new_buffer = calloc(decoded_msg_len + conn->msg_len, sizeof(char));
+          memcpy(new_buffer, conn->msg, conn->msg_len);
+          memcpy(new_buffer + conn->msg_len, decoded_msg, decoded_msg_len);
+          conn->msg_len += decoded_msg_len;
         }
-        memcpy(conn_state->buf, conn_state->buf + conn_state->buf_len,
-             conn_state->bytes_read - conn_state->buf_len);
-        memset(conn_state->buf + conn_state->bytes_read - conn_state->buf_len, 0, conn_state->buf_len);
-        conn_state->bytes_read -= conn_state->buf_len;
-        conn_state->data_frame_received = 0;
-        if (conn_state->bytes_read == 0) {
+        memcpy(conn->buf, conn->buf + conn->buf_len,
+             conn->bytes_read - conn->buf_len);
+        memset(conn->buf + conn->bytes_read - conn->buf_len, 0, conn->buf_len);
+        conn->bytes_read -= conn->buf_len;
+        conn->data_frame_received = 0;
+        if (conn->bytes_read == 0) {
           finished = 1;
-        } else if (conn_state->bytes_read > 0) {   //if there was another message, or at least its frame we need to extract the information here
-          size_t old_buf_len = conn_state->buf_len;
-          parse_data_frame(conn_state);
-          if (conn_state->buf_len > old_buf_len) {
+        } else if (conn->bytes_read > 0) {   //if there was another message, or at least its frame we need to extract the information here
+          size_t old_buf_len = conn->buf_len;
+          parse_data_frame(conn);
+          if (conn->buf_len > old_buf_len) {
             //allocate more space
-            char *new_buffer = calloc(conn_state->buf_len, sizeof(char));
-            memcpy(new_buffer, conn_state->buf, conn_state->bytes_read);
-            free(conn_state->buf);
-            conn_state->buf = new_buffer;
+            char *new_buffer = calloc(conn->buf_len, sizeof(char));
+            memcpy(new_buffer, conn->buf, conn->bytes_read);
+            free(conn->buf);
+            conn->buf = new_buffer;
           }
         }
       }
@@ -493,7 +491,7 @@ int main(int argc, char const *argv[]) {
     exit(1);
   }
 
-  struct conn_state conn_states[MAX_CLIENTS];
+  struct conn_state_t conn_states[MAX_CLIENTS];
   memset(conn_states, 0, sizeof(conn_states));
 
   connections = hashmap_new();
@@ -606,16 +604,16 @@ int main(int argc, char const *argv[]) {
         }
       } else {
         int clientfd = events[i].data.fd;
-        struct conn_state *conn_state = &conn_states[events[i].data.fd];
+        struct conn_state_t *conn = &conn_states[events[i].data.fd];
         if (events[i].events & EPOLLOUT) {
-          resume_write(clientfd, conn_state, efd);
+          resume_write(clientfd, conn, efd);
         } else {
-          if (conn_state->protocol == HTTP_PROTOCOL) {
-            printf("Http request from client %d, from %s\n", clientfd, conn_state->ip);
-            read_http_request(clientfd, conn_state, efd);
+          if (conn->protocol == HTTP_PROTOCOL) {
+            printf("Http request from client %d, from %s\n", clientfd, conn->ip);
+            read_http_request(clientfd, conn, efd);
           } else {
-            printf("WebSocket message from client %d, from %s\n", clientfd, conn_state->ip);
-            read_ws_message(clientfd, conn_state, efd);
+            printf("WebSocket message from client %d, from %s\n", clientfd, conn->ip);
+            read_ws_message(clientfd, conn, efd);
           }
         }
       }
