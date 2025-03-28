@@ -68,6 +68,28 @@ struct conn_state_t {         //used to store state of connection if we got part
   struct write_queue_t queue;    //write needs a queue in case we had partial write and then read which started another write
 };
 
+static int add_to_epoll(int efd, int fd, uint32_t flags) {
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof(struct epoll_event));
+  ev.data.fd = fd;
+  ev.events = flags;
+  return epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ev);
+}
+
+static int update_epoll(int efd, int fd, uint32_t flags) {
+  struct epoll_event ev;
+  memset(&ev, 0, sizeof(struct epoll_event));
+  ev.data.fd = fd;
+  ev.events = flags;
+  return epoll_ctl(efd, EPOLL_CTL_MOD, fd, &ev);
+}
+
+static int set_nonblocking(int fd) {
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) return -1;
+  return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 void queue_append(struct write_queue_t *queue, struct write_state_t *state) {
   if (queue->size == 0) {
     queue->head = state;
@@ -163,11 +185,7 @@ void resume_write(int clientfd, struct conn_state_t* conn, int efd) {
           queue_remove_front(
                 &conn->queue);                            //and return if there are no enqueued operations
           if (conn->queue.size == 0) {
-            struct epoll_event event;
-            memset(&event, 0, sizeof(event));
-            event.data.fd = clientfd;
-            event.events = EPOLLIN | EPOLLET;
-            epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+            update_epoll(efd, clientfd, EPOLLIN | EPOLLET);
             break;
           } else {
             //update variables so that next write starts to write next message
@@ -191,11 +209,7 @@ void write_to_socket(int clientfd, char* msg, size_t msg_len, struct conn_state_
     if (bytes_wrote == -1) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
         //we didn't fit it all - need to check again later
-        struct epoll_event event;
-        memset(&event, 0, sizeof(event));
-        event.events = EPOLLIN | EPOLLOUT | EPOLLET;
-        event.data.fd = clientfd;
-        epoll_ctl(efd, EPOLL_CTL_MOD, clientfd, &event);
+        update_epoll(efd, clientfd, EPOLLIN | EPOLLOUT | EPOLLET);
         //also save the state
         struct write_state_t* state = calloc(1, sizeof(struct write_state_t));
         if (!state) {
@@ -580,7 +594,7 @@ int main(int argc, char const *argv[]) {
     exit(1);
   }
 
-  res = fcntl(sockfd, F_SETFL, fcntl(sockfd, F_GETFL, 0) | O_NONBLOCK);
+  res = set_nonblocking(sockfd);
   if (res == -1) {
     perror("error on setting socket as non-blocking");
     exit(1);
@@ -598,11 +612,7 @@ int main(int argc, char const *argv[]) {
     exit(1);
   }
 
-  struct epoll_event event;
-  memset(&event, 0, sizeof(struct epoll_event));
-  event.data.fd = sockfd;
-  event.events = EPOLLIN | EPOLLET;
-  res = epoll_ctl(efd, EPOLL_CTL_ADD, sockfd, &event);
+  res = add_to_epoll(efd, sockfd, EPOLLIN | EPOLLET);
   if (res == -1) {
     perror("on adding sockfd to epoll");
     exit(1);
@@ -637,15 +647,13 @@ int main(int argc, char const *argv[]) {
         } else {
           printf("Accepted %d\n", clientfd);
           //no error - mark as non blocking and add to epoll set
-          res = fcntl(clientfd, F_SETFL, fcntl(clientfd, F_GETFL, 0) | O_NONBLOCK);
+          res = set_nonblocking(clientfd);
           if (res == -1) {
             perror("error on setting socket as non-blocking");
             exit(1);
           }
-          memset(&event, 0, sizeof(struct epoll_event));
-          event.events = EPOLLIN;
-          event.data.fd = clientfd;
-          if (epoll_ctl(efd, EPOLL_CTL_ADD, clientfd, &event) == -1) {
+
+          if (add_to_epoll(efd,clientfd, EPOLLIN) == -1) {
             perror("epoll_ctl: on adding client socked");
             exit(1);
           }
