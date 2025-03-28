@@ -374,7 +374,7 @@ void dispatch_clients_request(char *msg, struct conn_state *conn_state, int efd)
     char* extracted_payload = calloc(len, sizeof(char));
     memcpy(extracted_payload, payload, len);
     printf("%s\n", extracted_payload);
-    int code = hashmap_get(connections, target, &clientfd);
+    int code = hashmap_get(connections, target, (void *)&clientfd);
     if (code != 0) {
         printf("%s not found, sending NOT_CONNECTED\n", target);
         char *buf = calloc(128, sizeof(char));
@@ -598,7 +598,7 @@ int main(int argc, char const *argv[]) {
                         printf("New client with IP %s\n", key);
                         memcpy(conn_states[clientfd].ip, key, strlen(key));
                         conn_states[clientfd].fd = clientfd;
-                        hashmap_put(connections, key, clientfd);
+                        hashmap_put(connections, key, &clientfd);
                     } else {
                         printf("Unable to get address\n");
                         release_and_reset(&conn_states[clientfd]);
