@@ -19,6 +19,17 @@
 
 #include "hashmap.h"
 
+#ifndef BUFFER_SIZE
+  #define BUFFER_SIZE 1024
+#endif
+
+#define WS_FR_OP_CONT 0
+#define WS_FR_OP_TXT  1
+#define WS_FR_OP_BIN  2
+#define WS_FR_OP_CLSE 8
+#define WS_FR_OP_PING 0x9
+#define WS_FR_OP_PONG 0xA
+
 #define MAX_EVENTS 1000
 #define MAX_CLIENTS 1000
 #define HTTP_PROTOCOL 0
@@ -29,6 +40,14 @@
     free(p);           \
     p = NULL;          \
   }                    \
+}
+
+#define close_handle(fd)                                          \
+{                                                                 \
+  if (fd != -1 && shutdown(fd, SHUT_RDWR) == 0 && close(fd) == 0) \
+  {                                                               \
+    fd = -1;                                                      \
+  }                                                               \
 }
 
 map_t connections;
@@ -127,7 +146,7 @@ void release_and_reset(struct conn_state_t *conn) {
     state = state->next;
   }
   hashmap_remove(connections, conn->ip);
-  close(conn->fd);
+  close_handle(conn->fd);
   memset(conn, 0, sizeof(struct conn_state_t));
 }
 
@@ -169,7 +188,7 @@ void resume_write(int clientfd, struct conn_state_t* conn, int efd) {
 
   while (1) {
     size_t offset = conn->queue.head->bytes_wrote;
-    size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
+    size_t to_write = remaining_bytes < BUFFER_SIZE ? remaining_bytes : BUFFER_SIZE;
     ssize_t bytes_wrote = write(clientfd, msg + offset, to_write);
     if (bytes_wrote == -1) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -211,7 +230,7 @@ void write_to_socket(
   size_t remaining_bytes = msg_len;
   size_t bytes_sent = 0;
   while (1) {
-    size_t to_write = remaining_bytes < 4096 ? remaining_bytes : 4096;
+    size_t to_write = remaining_bytes < BUFFER_SIZE ? remaining_bytes : BUFFER_SIZE;
     ssize_t bytes_wrote = write(clientfd, msg + bytes_sent, to_write);
     if (bytes_wrote == -1) {
       if (errno == EWOULDBLOCK || errno == EAGAIN) {
@@ -319,12 +338,12 @@ void read_http_request(int clientfd, struct conn_state_t *conn, int efd) {
   char finished = 0;
   // if read is not resumed allocate some space
   if (conn->bytes_read == 0) {
-    conn->buf = calloc(1024, sizeof(char));
+    conn->buf = calloc(BUFFER_SIZE, sizeof(char));
     if (!conn->buf) {
       perror("alloc buffer fail");
       exit(1);
     }
-    conn->buf_len = 1024;
+    conn->buf_len = BUFFER_SIZE;
   }
   while (1) {
     ssize_t bytes_read = read(clientfd, conn->buf + conn->bytes_read,
@@ -473,12 +492,12 @@ void read_ws_message(int clientfd, struct conn_state_t *conn, int efd) {
   char finished = 0;
   // if read is not resumed allocate some space
   if (conn->bytes_read == 0) {
-    conn->buf = calloc(1024, sizeof(char));
+    conn->buf = calloc(BUFFER_SIZE, sizeof(char));
     if (!conn->buf)  {
       perror("allocate buffer failed");
       exit(1);
     }
-    conn->buf_len = 1024;
+    conn->buf_len = BUFFER_SIZE;
   }
   while (1) {
     ssize_t bytes_read = read(clientfd, conn->buf + conn->bytes_read,
@@ -527,7 +546,7 @@ void read_ws_message(int clientfd, struct conn_state_t *conn, int efd) {
           return;
         }
         if (conn->fin) {
-          if (conn->opcode == 0x9) {
+          if (conn->opcode == WS_FR_OP_PING) {
             // it's a ping
             ;
           } else {
@@ -535,12 +554,12 @@ void read_ws_message(int clientfd, struct conn_state_t *conn, int efd) {
             dispatch_clients_request(decoded_msg, conn, efd);
           }
           safe_free(decoded_msg);
-        } else if (conn->opcode == 0x1 ||
-               conn->opcode == 0x2) {
+        } else if (conn->opcode == WS_FR_OP_TXT ||
+               conn->opcode == WS_FR_OP_BIN) {
           // new message that will be continued, were saving it
           conn->msg = decoded_msg;
           conn->msg_len = decoded_msg_len;
-        } else if (conn->opcode == 0x0) {
+        } else if (conn->opcode == WS_FR_OP_CONT) {
           // continuation of a message
           char *new_buffer = calloc(decoded_msg_len + conn->msg_len, sizeof(char));
           if (!new_buffer) {
@@ -614,8 +633,7 @@ static int create_socket(const char *bind_addr, uint16_t bind_port) {
     if (ret == 0 && bind(tcp_fd, rp->ai_addr, rp->ai_addrlen) == 0) {
       break;
     }
-    close(tcp_fd);
-    tcp_fd = -1;
+    close_handle(tcp_fd);
   }
 
   freeaddrinfo(result);
