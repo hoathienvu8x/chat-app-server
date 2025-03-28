@@ -173,9 +173,10 @@ static void parse_data_frame(struct conn_state_t *conn) {
     return;
 
   char *buf = conn->buf;
-  size_t msg_len = (unsigned int) (*(buf + 1) & 127);
-  conn->fin = (buf[0] & 128) ? (char) 1 : (char) 0;
-  conn->opcode = buf[0] & 0b00001111;
+  conn->fin = (buf[0] & 0x80) >> 7;
+  conn->opcode = buf[0] & 0x0f;
+  uint64_t msg_len = buf[1] & 0x7f;
+
   if (msg_len <= 125) {
     conn->skip = 6;
     conn->buf_len = msg_len + conn->skip;
@@ -513,6 +514,12 @@ static void read_ws_message(int clientfd, struct conn_state_t *conn) {
             // it's a ping
             tcp_server_send(conn, WS_FR_OP_PONG, NULL, 0);
           } else {
+             if (conn->opcode == WS_FR_OP_CLSE) {
+              // it's a close
+              puts("Closing handshake");
+              release_and_reset(conn);
+              return;
+            }
             // process message
             dispatch_clients_request(decoded_msg, conn, decoded_msg_len);
           }
